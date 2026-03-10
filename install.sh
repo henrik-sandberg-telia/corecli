@@ -24,8 +24,7 @@ CLIENT_ID="aebc6443-996d-45c2-90f0-388ff96faa56"        # VS Code public client 
 SCOPE="https://storage.azure.com/user_impersonation"
 STORAGE_BASE="https://sptweusacorecli.blob.core.windows.net/releases"
 LATEST_TXT_URL="$STORAGE_BASE/latest.txt"
-INSTALL_DIR="$HOME/.corecli/bin"
-INSTALL_BIN="$INSTALL_DIR/CoreCli"
+INSTALL_DIR="${XDG_BIN_HOME:-$HOME/.local/bin}"
 TMP_ZIP="/tmp/CoreCli_install_$$.zip"
 TMP_EXTRACT="/tmp/corecli-extract-$$"
 TMP_CODE="/tmp/CoreCli_authcode_$$"
@@ -234,17 +233,19 @@ green "Latest stable: $VERSION"
 echo ""
 
 # ---------------------------------------------------------------------------
-# 4. Prompt for symlink name
+# 4. Prompt for binary name
 # ---------------------------------------------------------------------------
 
-read -rp "Symlink name in ~/bin [corecli]: " LINK_NAME
+read -rp "Binary name in $INSTALL_DIR [corecli]: " LINK_NAME
 LINK_NAME="${LINK_NAME:-corecli}"
 
-[[ "$LINK_NAME" != */* ]] || die "Symlink name must not contain '/'. Got: $LINK_NAME"
-[[ -n "$LINK_NAME" ]]     || die "Symlink name must not be empty."
+[[ "$LINK_NAME" != */* ]] || die "Binary name must not contain '/'. Got: $LINK_NAME"
+[[ -n "$LINK_NAME" ]]     || die "Binary name must not be empty."
+
+INSTALL_BIN="$INSTALL_DIR/$LINK_NAME"
 
 echo ""
-bold "Installing CoreCli $VERSION as ~/bin/$LINK_NAME..."
+bold "Installing CoreCli $VERSION to $INSTALL_DIR/$LINK_NAME..."
 echo ""
 
 # ---------------------------------------------------------------------------
@@ -283,29 +284,17 @@ find "$EXTRACTED_DIR" -maxdepth 1 -name '*.pdb' -exec install -m 644 {} "$INSTAL
 green "Binary and debug symbols (PDB) installed to $INSTALL_DIR"
 
 # ---------------------------------------------------------------------------
-# 6. Symlink
+# 6. PATH check
 # ---------------------------------------------------------------------------
 
-mkdir -p "$HOME/bin"
-
-LINK_PATH="$HOME/bin/$LINK_NAME"
-if [[ -L "$LINK_PATH" ]]; then
-  rm "$LINK_PATH"
-elif [[ -e "$LINK_PATH" ]]; then
-  die "$LINK_PATH already exists and is not a symlink. Remove it manually and retry."
-fi
-
-ln -s "$INSTALL_BIN" "$LINK_PATH"
-green "Symlink created: $LINK_PATH -> $INSTALL_BIN"
-
-# Warn if ~/bin is not on PATH
+# Warn if ~/.local/bin (or $XDG_BIN_HOME) is not on PATH
 case ":$PATH:" in
-  *":$HOME/bin:"*) ;;
+  *":$INSTALL_DIR:"*) ;;
   *)
     echo ""
-    yellow "WARNING: ~/bin is not in your \$PATH."
+    yellow "WARNING: $INSTALL_DIR is not in your \$PATH."
     yellow "Add the following to your ~/.bashrc or ~/.profile:"
-    printf '  export PATH="$HOME/bin:$PATH"\n'
+    printf '  export PATH="%s:$PATH"\n' "$INSTALL_DIR"
     ;;
 esac
 
@@ -321,4 +310,4 @@ green "OK: $INSTALL_VERSION"
 echo ""
 green "CoreCli $VERSION installed successfully."
 green "Browser routing verified — corecli login will work on this machine."
-printf 'Run: %s\n' "$LINK_NAME"
+printf 'Run: %s\n' "$INSTALL_BIN"
