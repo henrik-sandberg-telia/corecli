@@ -31,6 +31,7 @@ TMP_CODE="/tmp/CoreCli_authcode_$$"
 TMP_PYLISTENER="/tmp/CoreCli_listener_$$.py"
 ZIP_INNER_DIR="CoreCli/linux-x64-singlefile"   # directory containing binary + PDB files
 ZIP_INNER_PATH="CoreCli/linux-x64-singlefile/CoreCli"  # the executable (for reference)
+DEBUG=0
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -43,23 +44,109 @@ bold()   { printf '\033[1m%s\033[0m\n' "$*"; }
 
 die() { red "ERROR: $*" >&2; exit 1; }
 
+debug_log() {
+  [[ "$DEBUG" -eq 1 ]] || return 0
+  printf '[debug] %s\n' "$*"
+}
+
+show_usage() {
+  cat <<'USAGE'
+Usage: ./scripts/install.sh [--debug|-d] [--help|-h]
+
+Options:
+  -d, --debug   Print auth URL and browser-launch diagnostics.
+  -h, --help    Show this help and exit.
+USAGE
+}
+
+for arg in "$@"; do
+  case "$arg" in
+    -d|--debug)
+      DEBUG=1
+      ;;
+    -h|--help)
+      show_usage
+      exit 0
+      ;;
+    *)
+      die "Unknown argument: $arg. Use --help to see supported options."
+      ;;
+  esac
+done
+
 open_browser() {
   local url="$1"
+  local is_wsl=0
+  local resolved_xdg="<not-found>"
+  local resolved_wslview="<not-found>"
+
+  if command -v xdg-open >/dev/null 2>&1; then
+    resolved_xdg="$(command -v xdg-open)"
+  fi
+  if command -v wslview >/dev/null 2>&1; then
+    resolved_wslview="$(command -v wslview)"
+  fi
+
+  if grep -qiE "(microsoft|wsl)" /proc/version 2>/dev/null; then
+    is_wsl=1
+  fi
+
+  debug_log "Browser launch context: is_wsl=$is_wsl BROWSER=${BROWSER:-<unset>}"
+  debug_log "Resolved launchers: xdg-open=$resolved_xdg wslview=$resolved_wslview"
+
   # 1. Respect explicit BROWSER env var (works everywhere including WSL)
   if [[ -n "${BROWSER:-}" ]]; then
-    "$BROWSER" "$url" 2>/dev/null || true
-    return
+    if command -v "$BROWSER" >/dev/null 2>&1; then
+      debug_log "Resolved BROWSER binary: $(command -v "$BROWSER")"
+    else
+      debug_log "Resolved BROWSER binary: <not-found-or-not-in-PATH> (may still be a valid absolute path)"
+    fi
+    debug_log "Trying BROWSER launcher: $BROWSER"
+    if "$BROWSER" "$url" 2>/dev/null; then
+      debug_log "Browser opened with BROWSER launcher"
+      return
+    fi
+    debug_log "BROWSER launcher failed"
   fi
-  # 2. xdg-open — standard on Linux; in WSL it delegates to Windows via xdg-settings
-  if command -v xdg-open >/dev/null 2>&1; then
-    xdg-open "$url" 2>/dev/null || true
-    return
+
+  # 2. On WSL, prefer wslview before xdg-open to avoid wrapper quirks.
+  if [[ "$is_wsl" -eq 1 ]]; then
+    if command -v wslview >/dev/null 2>&1; then
+      debug_log "Trying launcher: wslview"
+      if wslview "$url" 2>/dev/null; then
+        debug_log "Browser opened with wslview"
+        return
+      fi
+      debug_log "wslview launcher failed"
+    fi
+    if command -v xdg-open >/dev/null 2>&1; then
+      debug_log "Trying launcher: xdg-open"
+      if xdg-open "$url" 2>/dev/null; then
+        debug_log "Browser opened with xdg-open"
+        return
+      fi
+      debug_log "xdg-open launcher failed"
+    fi
+  else
+    # 2. Native Linux: xdg-open first, then wslview fallback if available.
+    if command -v xdg-open >/dev/null 2>&1; then
+      debug_log "Trying launcher: xdg-open"
+      if xdg-open "$url" 2>/dev/null; then
+        debug_log "Browser opened with xdg-open"
+        return
+      fi
+      debug_log "xdg-open launcher failed"
+    fi
+    if command -v wslview >/dev/null 2>&1; then
+      debug_log "Trying launcher: wslview"
+      if wslview "$url" 2>/dev/null; then
+        debug_log "Browser opened with wslview"
+        return
+      fi
+      debug_log "wslview launcher failed"
+    fi
   fi
-  # 3. wslview — wslu package, the dedicated WSL browser bridge
-  if command -v wslview >/dev/null 2>&1; then
-    wslview "$url" 2>/dev/null || true
-    return
-  fi
+
   die "Could not open a browser. CoreCli install requires a working browser to authenticate.
 
   Fix browser routing first, then re-run this script:
@@ -165,8 +252,21 @@ AUTH_URL+="&code_challenge=${CODE_CHALLENGE}"
 AUTH_URL+="&code_challenge_method=S256"
 AUTH_URL+="&prompt=select_account"
 
+# Guard against accidental URL mangling before browser launch.
+for required in "client_id=" "response_type=code" "redirect_uri=" "scope=" "code_challenge="; do
+  [[ "$AUTH_URL" == *"$required"* ]] || die "Auth URL is missing required parameter: $required"
+done
+
+debug_log "Authorize URL length: ${#AUTH_URL}"
+
 echo ""
 yellow "Opening browser for authentication..."
+if [[ "$DEBUG" -eq 1 ]]; then
+  yellow "Debug: full authorize URL"
+  echo "$AUTH_URL"
+  echo ""
+  yellow "If the opened page shows an auth parameter error, copy/paste the full URL above manually."
+fi
 echo ""
 open_browser "$AUTH_URL"
 
@@ -185,7 +285,25 @@ LISTENER_PID=""
 
 [[ -n "$AUTH_CODE" ]] || die "Authentication timed out — the browser redirect to localhost was not received.
 
-  This usually means browser routing is not working. Fix it, then re-run:
+  This usually means browser routing or WSL localhost forwarding is not working.
+
+  If you recently switched VPN connections in Windows, localhost forwarding may be stale.
+  Recovery steps:
+    1) From Windows PowerShell: wsl --shutdown
+    2) Re-open WSL terminal
+    3) Re-run: ./scripts/install.sh --debug
+
+  Quick forwarding test (from WSL):
+    python3 -m http.server 8765 --bind 127.0.0.1
+  Then open in Windows browser:
+    http://localhost:8765
+  If that fails, forwarding is broken on the Windows/WSL side (often VPN/firewall policy).
+
+  Ensure %UserProfile%/.wslconfig contains:
+    [wsl2]
+    localhostForwarding=true
+
+  Browser routing fix options:
 
   On WSL/Ubuntu — install wslu:
     sudo apt install wslu
