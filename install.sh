@@ -79,6 +79,7 @@ open_browser() {
   local is_wsl=0
   local resolved_xdg="<not-found>"
   local resolved_wslview="<not-found>"
+  local resolved_browser="<not-found>"
 
   if command -v xdg-open >/dev/null 2>&1; then
     resolved_xdg="$(command -v xdg-open)"
@@ -94,19 +95,44 @@ open_browser() {
   debug_log "Browser launch context: is_wsl=$is_wsl BROWSER=${BROWSER:-<unset>}"
   debug_log "Resolved launchers: xdg-open=$resolved_xdg wslview=$resolved_wslview"
 
+  # Hard block: in WSL, refuse likely user-wrapper xdg-open when wslview is absent.
+  # This avoids OAuth URL mangling observed with legacy wrapper setups.
+  if [[ "$is_wsl" -eq 1 && "$resolved_wslview" == "<not-found>" && "$resolved_xdg" == "$HOME"/* ]]; then
+    die "Detected user-managed xdg-open at '$resolved_xdg' in WSL without wslview.
+
+  This setup can mangle Entra auth URLs and break login.
+
+  Fix options:
+    1) Install wslview (recommended):
+         sudo apt install wslu
+    2) Or set BROWSER to a real Windows browser executable (not xdg-open/wslview):
+         export BROWSER='/mnt/c/Program Files (x86)/Microsoft/Edge/Application/msedge.exe'
+
+  Then re-run with:
+    ./scripts/install.sh --debug"
+  fi
+
   # 1. Respect explicit BROWSER env var (works everywhere including WSL)
   if [[ -n "${BROWSER:-}" ]]; then
     if command -v "$BROWSER" >/dev/null 2>&1; then
-      debug_log "Resolved BROWSER binary: $(command -v "$BROWSER")"
+      resolved_browser="$(command -v "$BROWSER")"
+      debug_log "Resolved BROWSER binary: $resolved_browser"
     else
       debug_log "Resolved BROWSER binary: <not-found-or-not-in-PATH> (may still be a valid absolute path)"
     fi
-    debug_log "Trying BROWSER launcher: $BROWSER"
-    if "$BROWSER" "$url" 2>/dev/null; then
-      debug_log "Browser opened with BROWSER launcher"
-      return
+
+    # If BROWSER points to helper launchers, skip direct execution and use
+    # the platform fallbacks below to reduce risk of URL mangling.
+    if [[ "$resolved_browser" == "$resolved_xdg" || "$resolved_browser" == "$resolved_wslview" ]]; then
+      debug_log "BROWSER points to helper launcher; skipping direct BROWSER execution"
+    else
+      debug_log "Trying BROWSER launcher: $BROWSER"
+      if "$BROWSER" "$url" 2>/dev/null; then
+        debug_log "Browser opened with BROWSER launcher"
+        return
+      fi
+      debug_log "BROWSER launcher failed"
     fi
-    debug_log "BROWSER launcher failed"
   fi
 
   # 2. On WSL, prefer wslview before xdg-open to avoid wrapper quirks.
