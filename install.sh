@@ -30,7 +30,6 @@ TMP_EXTRACT="/tmp/corecli-extract-$$"
 TMP_CODE="/tmp/CoreCli_authcode_$$"
 TMP_PYLISTENER="/tmp/CoreCli_listener_$$.py"
 ZIP_INNER_DIR="CoreCli/linux-x64-singlefile"   # directory containing binary + PDB files
-ZIP_INNER_PATH="CoreCli/linux-x64-singlefile/CoreCli"  # the executable (for reference)
 DEBUG=0
 
 # ---------------------------------------------------------------------------
@@ -416,8 +415,14 @@ unzip -o -q "$TMP_ZIP" "${ZIP_INNER_DIR}/*" -d "$TMP_EXTRACT" \
   || die "Failed to extract '${ZIP_INNER_DIR}' from zip. Check that the zip structure matches."
 
 EXTRACTED_DIR="$TMP_EXTRACT/$ZIP_INNER_DIR"
-EXTRACTED_BIN="$EXTRACTED_DIR/CoreCli"
-[[ -f "$EXTRACTED_BIN" ]] || die "Extracted binary not found at expected path: $EXTRACTED_BIN"
+
+if [[ -f "$EXTRACTED_DIR/corecli" ]]; then
+  EXTRACTED_BIN="$EXTRACTED_DIR/corecli"
+elif [[ -f "$EXTRACTED_DIR/CoreCli" ]]; then
+  EXTRACTED_BIN="$EXTRACTED_DIR/CoreCli"
+else
+  die "Extracted binary not found at expected paths: $EXTRACTED_DIR/corecli or $EXTRACTED_DIR/CoreCli"
+fi
 
 mkdir -p "$INSTALL_DIR"
 # Install binary with execute permission
