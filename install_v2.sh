@@ -172,6 +172,36 @@ install_missing_packages() {
   "${apt_cmd[@]}" install -y "${packages[@]}"
 }
 
+resolve_icu_package() {
+  if ! command -v apt-cache >/dev/null 2>&1; then
+    printf '%s\n' "libicu-dev"
+    return 0
+  fi
+
+  local package_name
+  package_name="$(apt-cache pkgnames 2>/dev/null | grep -E '^libicu[0-9]+$' | sort -V | tail -n 1)"
+  if [[ -n "$package_name" ]]; then
+    printf '%s\n' "$package_name"
+    return 0
+  fi
+
+  printf '%s\n' "libicu-dev"
+}
+
+ensure_runtime_requirements() {
+  local runtime_packages=()
+
+  if ! ldconfig -p 2>/dev/null | grep -q 'libicuuc'; then
+    runtime_packages+=("$(resolve_icu_package)")
+  fi
+
+  install_missing_packages "${runtime_packages[@]}"
+
+  if ! ldconfig -p 2>/dev/null | grep -q 'libicuuc'; then
+    die "CoreCli requires ICU on Linux. Install libicu and retry."
+  fi
+}
+
 ensure_required_tools() {
   local missing_packages=()
   local tool
@@ -383,6 +413,7 @@ LISTENER_PID=""
 # ---------------------------------------------------------------------------
 
 ensure_required_tools
+ensure_runtime_requirements
 
 # ---------------------------------------------------------------------------
 # 2. WSL browser setup
