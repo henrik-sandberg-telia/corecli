@@ -25,6 +25,7 @@ SCOPE="https://storage.azure.com/user_impersonation"
 STORAGE_BASE="https://sptweusacorecli.blob.core.windows.net/releases"
 LATEST_TXT_URL="$STORAGE_BASE/latest.txt"
 INSTALL_DIR="${XDG_BIN_HOME:-$HOME/.local/bin}"
+INSTALL_SCRIPT_VERSION="2026-04-29.1"
 TARGET_BROWSER="/mnt/c/Program Files (x86)/Microsoft/Edge/Application/msedge.exe"
 BROWSER_SETUP_MODE="auto"
 BROWSER_SETUP_MARKER="# CoreCli browser setup"
@@ -85,6 +86,15 @@ Options:
       --non-interactive Auto-accept installer prompts and use default values.
   -h, --help            Show this help and exit.
 USAGE
+}
+
+show_debug_banner() {
+  [[ "$DEBUG" -eq 1 ]] || return 0
+  yellow "Installer debug mode"
+  printf '  script: %s\n' "$0"
+  printf '  version: %s\n' "$INSTALL_SCRIPT_VERSION"
+  printf '  shell: %s\n' "${SHELL:-<unset>}"
+  printf '  install dir: %s\n' "$INSTALL_DIR"
 }
 
 is_wsl() {
@@ -173,12 +183,14 @@ configure_path_shell_env() {
   local reload_cmd
 
   if path_env_contains_install_dir; then
+    green "$INSTALL_DIR is already on PATH for this shell session."
     debug_log "Skipping PATH persistence because $INSTALL_DIR is already on PATH"
     return 0
   fi
 
   rc_file="$(select_shell_rc_file)"
   reload_cmd="$(shell_reload_command "$rc_file")"
+  debug_log "PATH setup target rc file: $rc_file"
 
   if rc_has_install_dir_path_export "$rc_file"; then
     yellow "WARNING: $INSTALL_DIR is not in your \$PATH for this shell session."
@@ -336,6 +348,8 @@ for arg in "$@"; do
       ;;
   esac
 done
+
+show_debug_banner
 
 open_browser() {
   local url="$1"
