@@ -37,6 +37,7 @@ TMP_PYLISTENER="/tmp/CoreCli_listener_$$.py"
 ZIP_INNER_DIR="CoreCli/linux-x64-singlefile"   # directory containing binary + PDB files
 DEBUG=0
 NON_INTERACTIVE=0
+LAST_SHELL_RC_FILE=""
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -131,6 +132,19 @@ shell_reload_command() {
   printf 'source "%s"' "$rc_file"
 }
 
+print_shell_reload_notice() {
+  local rc_file="$1"
+  local reason="${2:-To load PATH and BROWSER in your current shell now, run:}"
+
+  bold "IMPORTANT: reload your shell config"
+  yellow "$reason"
+  printf '  %s\n' "$(shell_reload_command "$rc_file")"
+}
+
+is_script_sourced() {
+  [[ "${BASH_SOURCE[0]}" != "$0" ]]
+}
+
 rc_has_target_browser_export() {
   local rc_file="$1"
   [[ -f "$rc_file" ]] || return 1
@@ -189,20 +203,20 @@ configure_path_shell_env() {
   fi
 
   rc_file="$(select_shell_rc_file)"
+  LAST_SHELL_RC_FILE="$rc_file"
   reload_cmd="$(shell_reload_command "$rc_file")"
   debug_log "PATH setup target rc file: $rc_file"
 
   if rc_has_install_dir_path_export "$rc_file"; then
     yellow "WARNING: $INSTALL_DIR is not in your \$PATH for this shell session."
-    yellow "It is already configured in $rc_file. To load it now, run:"
-    printf '  %s\n' "$reload_cmd"
+    yellow "It is already configured in $rc_file."
+    print_shell_reload_notice "$rc_file" "To load PATH in your current shell now, run:"
     return 0
   fi
 
   append_install_dir_path_export "$rc_file"
   green "Configured PATH update in $rc_file"
-  yellow "To load it in your shell after install, run:"
-  printf '  %s\n' "$reload_cmd"
+  print_shell_reload_notice "$rc_file" "PATH was added permanently to $rc_file. Run this now in your current shell:"
 }
 
 ensure_current_session_browser() {
@@ -300,13 +314,13 @@ configure_browser_shell_env() {
   ensure_current_session_browser
 
   rc_file="$(select_shell_rc_file)"
+  LAST_SHELL_RC_FILE="$rc_file"
   reload_cmd="$(shell_reload_command "$rc_file")"
 
   if rc_has_target_browser_export "$rc_file"; then
     green "Using Microsoft Edge for BROWSER in this installer session."
     green "BROWSER is already configured in $rc_file"
-    yellow "To load it in your shell after install, run:"
-    printf '  %s\n' "$reload_cmd"
+    print_shell_reload_notice "$rc_file" "To load BROWSER in your current shell after install, run:"
     return 0
   fi
 
@@ -321,8 +335,24 @@ configure_browser_shell_env() {
   append_target_browser_export "$rc_file"
   green "Using Microsoft Edge for BROWSER in this installer session."
   green "Configured BROWSER in $rc_file"
-  yellow "To load it in your shell after install, run:"
-  printf '  %s\n' "$reload_cmd"
+  print_shell_reload_notice "$rc_file" "BROWSER was added permanently to $rc_file. Run this now in your current shell:"
+}
+
+reload_shell_rc_if_possible() {
+  local rc_file="${LAST_SHELL_RC_FILE:-}"
+
+  [[ -n "$rc_file" ]] || return 0
+  [[ -f "$rc_file" ]] || return 0
+
+  if is_script_sourced; then
+    # shellcheck disable=SC1090
+    source "$rc_file"
+    green "Reloaded $rc_file into the current shell session."
+    return 0
+  fi
+
+  yellow "The installer cannot modify the parent shell environment when run via 'bash <(...)'."
+  print_shell_reload_notice "$rc_file" "Run this in the shell where you started the installer:"
 }
 
 for arg in "$@"; do
@@ -741,4 +771,9 @@ green "OK: $INSTALL_VERSION"
 echo ""
 green "CoreCli $VERSION installed successfully."
 green "Browser routing verified — corecli login will work on this machine."
+reload_shell_rc_if_possible
+if ! is_script_sourced && [[ -n "$LAST_SHELL_RC_FILE" ]]; then
+  echo ""
+  print_shell_reload_notice "$LAST_SHELL_RC_FILE" "Before using corecli in this shell, run:"
+fi
 printf 'Run: %s\n' "$INSTALL_BIN"
