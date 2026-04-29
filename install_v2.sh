@@ -28,6 +28,7 @@ INSTALL_DIR="${XDG_BIN_HOME:-$HOME/.local/bin}"
 TARGET_BROWSER="/mnt/c/Program Files (x86)/Microsoft/Edge/Application/msedge.exe"
 BROWSER_SETUP_MODE="auto"
 BROWSER_SETUP_MARKER="# CoreCli browser setup"
+PATH_SETUP_MARKER="# CoreCli path setup"
 TMP_ZIP="/tmp/CoreCli_install_$$.zip"
 TMP_EXTRACT="/tmp/corecli-extract-$$"
 TMP_CODE="/tmp/CoreCli_authcode_$$"
@@ -139,6 +140,57 @@ append_target_browser_export() {
     printf '\n%s\n' "$BROWSER_SETUP_MARKER"
     printf 'export BROWSER="%s"\n' "$TARGET_BROWSER"
   } >> "$rc_file"
+}
+
+path_env_contains_install_dir() {
+  case ":$PATH:" in
+    *":$INSTALL_DIR:"*)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+rc_has_install_dir_path_export() {
+  local rc_file="$1"
+  [[ -f "$rc_file" ]] || return 1
+  grep -Eq "(^|[[:space:]])PATH=.*${INSTALL_DIR//\//\\/}" "$rc_file"
+}
+
+append_install_dir_path_export() {
+  local rc_file="$1"
+  touch "$rc_file" || die "Could not create or update $rc_file"
+  {
+    printf '\n%s\n' "$PATH_SETUP_MARKER"
+    printf 'export PATH="%s:$PATH"\n' "$INSTALL_DIR"
+  } >> "$rc_file"
+}
+
+configure_path_shell_env() {
+  local rc_file
+  local reload_cmd
+
+  if path_env_contains_install_dir; then
+    debug_log "Skipping PATH persistence because $INSTALL_DIR is already on PATH"
+    return 0
+  fi
+
+  rc_file="$(select_shell_rc_file)"
+  reload_cmd="$(shell_reload_command "$rc_file")"
+
+  if rc_has_install_dir_path_export "$rc_file"; then
+    yellow "WARNING: $INSTALL_DIR is not in your \$PATH for this shell session."
+    yellow "It is already configured in $rc_file. To load it now, run:"
+    printf '  %s\n' "$reload_cmd"
+    return 0
+  fi
+
+  append_install_dir_path_export "$rc_file"
+  green "Configured PATH update in $rc_file"
+  yellow "To load it in your shell after install, run:"
+  printf '  %s\n' "$reload_cmd"
 }
 
 ensure_current_session_browser() {
@@ -661,15 +713,7 @@ green "Binary and debug symbols (PDB) installed to $INSTALL_DIR"
 # ---------------------------------------------------------------------------
 
 # Warn if ~/.local/bin (or $XDG_BIN_HOME) is not on PATH
-case ":$PATH:" in
-  *":$INSTALL_DIR:"*) ;;
-  *)
-    echo ""
-    yellow "WARNING: $INSTALL_DIR is not in your \$PATH."
-    yellow "Add the following to your ~/.bashrc or ~/.profile:"
-    printf '  export PATH="%s:$PATH"\n' "$INSTALL_DIR"
-    ;;
-esac
+configure_path_shell_env
 
   # ---------------------------------------------------------------------------
   # 7. Verify
