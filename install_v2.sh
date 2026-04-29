@@ -34,6 +34,7 @@ TMP_CODE="/tmp/CoreCli_authcode_$$"
 TMP_PYLISTENER="/tmp/CoreCli_listener_$$.py"
 ZIP_INNER_DIR="CoreCli/linux-x64-singlefile"   # directory containing binary + PDB files
 DEBUG=0
+NON_INTERACTIVE=0
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -51,15 +52,36 @@ debug_log() {
   printf '[debug] %s\n' "$*"
 }
 
+prompt_yes_no() {
+  local prompt="$1"
+  local default_answer="${2:-Y}"
+  local reply
+
+  if [[ "$NON_INTERACTIVE" -eq 1 ]]; then
+    debug_log "Auto-answering prompt in non-interactive mode: $prompt -> $default_answer"
+    [[ "$default_answer" =~ ^[Yy]$ ]]
+    return
+  fi
+
+  read -r -p "$prompt" reply
+  if [[ -z "$reply" ]]; then
+    reply="$default_answer"
+  fi
+
+  [[ "$reply" =~ ^[Yy]$ ]]
+}
+
 show_usage() {
   cat <<'USAGE'
-Usage: ./scripts/install.sh [--debug|-d] [--setup-browser] [--no-setup-browser] [--help|-h]
+Usage: ./scripts/install.sh [--debug|-d] [--setup-browser] [--no-setup-browser] [--yes|-y|--non-interactive] [--help|-h]
 
 Options:
   -d, --debug           Print auth URL and browser-launch diagnostics.
       --setup-browser   Persist BROWSER for WSL shells even if already set in this session.
       --no-setup-browser
                         Skip automatic WSL BROWSER setup.
+  -y, --yes,
+      --non-interactive Auto-accept installer prompts and use default values.
   -h, --help            Show this help and exit.
 USAGE
 }
@@ -119,6 +141,54 @@ append_target_browser_export() {
   } >> "$rc_file"
 }
 
+ensure_current_session_browser() {
+  export BROWSER="$TARGET_BROWSER"
+}
+
+install_missing_packages() {
+  local packages=("$@")
+  local apt_cmd=()
+
+  [[ ${#packages[@]} -gt 0 ]] || return 0
+
+  if ! command -v apt-get >/dev/null 2>&1; then
+    die "Missing required tools: ${packages[*]}. Install them manually and retry."
+  fi
+
+  yellow "Missing required tools: ${packages[*]}"
+  if ! prompt_yes_no "Install them now with apt-get? [Y/n]: " "Y"; then
+    die "Cannot continue without: ${packages[*]}"
+  fi
+
+  if [[ "$EUID" -eq 0 ]]; then
+    apt_cmd=(apt-get)
+  elif command -v sudo >/dev/null 2>&1; then
+    apt_cmd=(sudo apt-get)
+  else
+    die "sudo is required to install missing packages. Install sudo or run this script as root."
+  fi
+
+  "${apt_cmd[@]}" update
+  "${apt_cmd[@]}" install -y "${packages[@]}"
+}
+
+ensure_required_tools() {
+  local missing_packages=()
+  local tool
+
+  for tool in curl unzip python3; do
+    if ! command -v "$tool" >/dev/null 2>&1; then
+      missing_packages+=("$tool")
+    fi
+  done
+
+  install_missing_packages "${missing_packages[@]}"
+
+  for tool in curl unzip python3; do
+    command -v "$tool" >/dev/null 2>&1 || die "'$tool' is required but could not be installed."
+  done
+}
+
 configure_browser_shell_env() {
   local rc_file
   local reload_cmd
@@ -133,40 +203,32 @@ configure_browser_shell_env() {
     return 0
   fi
 
+  ensure_current_session_browser
+
   rc_file="$(select_shell_rc_file)"
   reload_cmd="$(shell_reload_command "$rc_file")"
 
   if rc_has_target_browser_export "$rc_file"; then
+    green "Using Microsoft Edge for BROWSER in this installer session."
     green "BROWSER is already configured in $rc_file"
-    if browser_env_is_target; then
-      green "Current shell already uses Microsoft Edge for BROWSER."
-    else
-      yellow "To load it in your current shell now, run:"
-      printf '  %s\n' "$reload_cmd"
-    fi
+    yellow "To load it in your shell after install, run:"
+    printf '  %s\n' "$reload_cmd"
     return 0
   fi
 
   if rc_has_any_browser_export "$rc_file"; then
+    green "Using Microsoft Edge for BROWSER in this installer session."
     yellow "Detected an existing BROWSER export in $rc_file. Leaving it unchanged."
-    if browser_env_is_target; then
-      green "Current shell already uses Microsoft Edge for BROWSER."
-    else
-      yellow "If you want to use Microsoft Edge for CoreCli auth, add:"
-      printf '  export BROWSER="%s"\n' "$TARGET_BROWSER"
-    fi
+    yellow "If you want to persist Microsoft Edge for future shells, add:"
+    printf '  export BROWSER="%s"\n' "$TARGET_BROWSER"
     return 0
   fi
 
   append_target_browser_export "$rc_file"
+  green "Using Microsoft Edge for BROWSER in this installer session."
   green "Configured BROWSER in $rc_file"
-
-  if browser_env_is_target; then
-    green "Current shell already uses Microsoft Edge for BROWSER."
-  else
-    yellow "To load it in your current shell now, run:"
-    printf '  %s\n' "$reload_cmd"
-  fi
+  yellow "To load it in your shell after install, run:"
+  printf '  %s\n' "$reload_cmd"
 }
 
 for arg in "$@"; do
@@ -179,6 +241,9 @@ for arg in "$@"; do
       ;;
     --no-setup-browser)
       BROWSER_SETUP_MODE="skip"
+      ;;
+    -y|--yes|--non-interactive)
+      NON_INTERACTIVE=1
       ;;
     -h|--help)
       show_usage
@@ -317,12 +382,18 @@ LISTENER_PID=""
 # 1. Dependency check
 # ---------------------------------------------------------------------------
 
-for cmd in curl unzip python3; do
-  command -v "$cmd" >/dev/null 2>&1 || die "'$cmd' is required but not installed. Please install it and retry."
-done
+ensure_required_tools
 
 # ---------------------------------------------------------------------------
-# 2. PKCE Authentication (browser-based — satisfies Conditional Access)
+# 2. WSL browser setup
+# ---------------------------------------------------------------------------
+
+echo ""
+bold "Checking browser setup..."
+configure_browser_shell_env
+
+# ---------------------------------------------------------------------------
+# 3. PKCE Authentication (browser-based — satisfies Conditional Access)
 # ---------------------------------------------------------------------------
 
 bold "Authenticating via browser (Entra ID)..."
@@ -496,8 +567,13 @@ echo ""
 # 4. Prompt for binary name
 # ---------------------------------------------------------------------------
 
-read -rp "Binary name in $INSTALL_DIR [corecli]: " LINK_NAME
-LINK_NAME="${LINK_NAME:-corecli}"
+if [[ "$NON_INTERACTIVE" -eq 1 ]]; then
+  LINK_NAME="corecli"
+  yellow "Non-interactive mode: using default binary name '$LINK_NAME'."
+else
+  read -rp "Binary name in $INSTALL_DIR [corecli]: " LINK_NAME
+  LINK_NAME="${LINK_NAME:-corecli}"
+fi
 
 [[ "$LINK_NAME" != */* ]] || die "Binary name must not contain '/'. Got: $LINK_NAME"
 [[ -n "$LINK_NAME" ]]     || die "Binary name must not be empty."
@@ -565,15 +641,7 @@ case ":$PATH:" in
 esac
 
   # ---------------------------------------------------------------------------
-  # 7. WSL browser setup
-  # ---------------------------------------------------------------------------
-
-  echo ""
-  bold "Checking browser setup..."
-  configure_browser_shell_env
-
-# ---------------------------------------------------------------------------
-  # 8. Verify
+  # 7. Verify
 # ---------------------------------------------------------------------------
 
 echo ""
