@@ -25,11 +25,14 @@ SCOPE="https://storage.azure.com/user_impersonation"
 STORAGE_BASE="https://sptweusacorecli.blob.core.windows.net/releases"
 LATEST_TXT_URL="$STORAGE_BASE/latest.txt"
 INSTALL_DIR="${XDG_BIN_HOME:-$HOME/.local/bin}"
-INSTALL_SCRIPT_VERSION="2026-04-29.1"
+INSTALL_SCRIPT_VERSION="2026-04-30.1"
+PROXY_TOGGLE_URL="https://raw.githubusercontent.com/henrik-sandberg-telia/corecli/main/proxy-toggle.sh"
+PROXY_TOGGLE_BIN="$INSTALL_DIR/proxy-toggle.sh"
 TARGET_BROWSER="/mnt/c/Program Files (x86)/Microsoft/Edge/Application/msedge.exe"
 BROWSER_SETUP_MODE="auto"
 BROWSER_SETUP_MARKER="# CoreCli browser setup"
 PATH_SETUP_MARKER="# CoreCli path setup"
+PROXY_FUNCTION_MARKER="# CoreCli proxy function"
 TMP_ZIP="/tmp/CoreCli_install_$$.zip"
 TMP_EXTRACT="/tmp/corecli-extract-$$"
 TMP_CODE="/tmp/CoreCli_authcode_$$"
@@ -134,7 +137,7 @@ shell_reload_command() {
 
 print_shell_reload_notice() {
   local rc_file="$1"
-  local reason="${2:-To load PATH and BROWSER in your current shell now, run:}"
+  local reason="${2:-To load PATH, BROWSER, and the proxy() helper in your current shell now, run:}"
 
   bold "IMPORTANT: reload your shell config"
   yellow "$reason"
@@ -190,6 +193,50 @@ append_install_dir_path_export() {
     printf '\n%s\n' "$PATH_SETUP_MARKER"
     printf 'export PATH="%s:$PATH"\n' "$INSTALL_DIR"
   } >> "$rc_file"
+}
+
+rc_has_proxy_function() {
+  local rc_file="$1"
+  [[ -f "$rc_file" ]] || return 1
+  grep -Fq "$PROXY_FUNCTION_MARKER" "$rc_file"
+}
+
+append_proxy_function() {
+  local rc_file="$1"
+  touch "$rc_file" || die "Could not create or update $rc_file"
+  {
+    printf '\n%s\n' "$PROXY_FUNCTION_MARKER"
+    printf 'proxy() {\n'
+    printf '    source "%s" "$@"\n' "$PROXY_TOGGLE_BIN"
+    printf '}\n'
+  } >> "$rc_file"
+}
+
+install_proxy_toggle_script() {
+  mkdir -p "$INSTALL_DIR"
+  yellow "Installing proxy helper..."
+  curl -fsSL "$PROXY_TOGGLE_URL" -o "$PROXY_TOGGLE_BIN" \
+    || die "Could not download proxy-toggle.sh from $PROXY_TOGGLE_URL"
+  chmod 755 "$PROXY_TOGGLE_BIN"
+  green "Proxy helper installed to $PROXY_TOGGLE_BIN"
+}
+
+configure_proxy_shell_function() {
+  local rc_file
+
+  rc_file="$(select_shell_rc_file)"
+  LAST_SHELL_RC_FILE="$rc_file"
+  debug_log "Proxy function target rc file: $rc_file"
+
+  if rc_has_proxy_function "$rc_file"; then
+    green "proxy() is already configured in $rc_file"
+    print_shell_reload_notice "$rc_file" "To load the proxy() helper in your current shell now, run:"
+    return 0
+  fi
+
+  append_proxy_function "$rc_file"
+  green "Configured proxy() in $rc_file"
+  print_shell_reload_notice "$rc_file" "proxy() was added permanently to $rc_file. Run this now in your current shell:"
 }
 
 configure_path_shell_env() {
@@ -753,14 +800,25 @@ find "$EXTRACTED_DIR" -maxdepth 1 -name '*.pdb' -exec install -m 644 {} "$INSTAL
 green "Binary and debug symbols (PDB) installed to $INSTALL_DIR"
 
 # ---------------------------------------------------------------------------
-# 6. PATH check
+# 6. Proxy helper
 # ---------------------------------------------------------------------------
 
-# Warn if ~/.local/bin (or $XDG_BIN_HOME) is not on PATH
+install_proxy_toggle_script
+
+# ---------------------------------------------------------------------------
+# 7. PATH check
+# ---------------------------------------------------------------------------
+
 configure_path_shell_env
 
-  # ---------------------------------------------------------------------------
-  # 7. Verify
+# ---------------------------------------------------------------------------
+# 8. Proxy function
+# ---------------------------------------------------------------------------
+
+configure_proxy_shell_function
+
+# ---------------------------------------------------------------------------
+# 9. Verify
 # ---------------------------------------------------------------------------
 
 echo ""
@@ -777,3 +835,4 @@ if ! is_script_sourced && [[ -n "$LAST_SHELL_RC_FILE" ]]; then
   print_shell_reload_notice "$LAST_SHELL_RC_FILE" "Before using corecli in this shell, run:"
 fi
 printf 'Run: %s\n' "$INSTALL_BIN"
+printf 'Then try: %s\n' 'proxy status'
