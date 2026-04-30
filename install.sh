@@ -25,12 +25,22 @@ SCOPE="https://storage.azure.com/user_impersonation"
 STORAGE_BASE="https://sptweusacorecli.blob.core.windows.net/releases"
 LATEST_TXT_URL="$STORAGE_BASE/latest.txt"
 INSTALL_DIR="${XDG_BIN_HOME:-$HOME/.local/bin}"
+INSTALL_SCRIPT_VERSION="2026-04-30.1"
+PROXY_TOGGLE_URL="https://raw.githubusercontent.com/henrik-sandberg-telia/corecli/main/proxy-toggle.sh"
+PROXY_TOGGLE_BIN="$INSTALL_DIR/proxy-toggle.sh"
+TARGET_BROWSER="/mnt/c/Program Files (x86)/Microsoft/Edge/Application/msedge.exe"
+BROWSER_SETUP_MODE="auto"
+BROWSER_SETUP_MARKER="# CoreCli browser setup"
+PATH_SETUP_MARKER="# CoreCli path setup"
+PROXY_FUNCTION_MARKER="# CoreCli proxy function"
 TMP_ZIP="/tmp/CoreCli_install_$$.zip"
 TMP_EXTRACT="/tmp/corecli-extract-$$"
 TMP_CODE="/tmp/CoreCli_authcode_$$"
 TMP_PYLISTENER="/tmp/CoreCli_listener_$$.py"
 ZIP_INNER_DIR="CoreCli/linux-x64-singlefile"   # directory containing binary + PDB files
 DEBUG=0
+NON_INTERACTIVE=0
+LAST_SHELL_RC_FILE=""
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -48,20 +58,363 @@ debug_log() {
   printf '[debug] %s\n' "$*"
 }
 
+prompt_yes_no() {
+  local prompt="$1"
+  local default_answer="${2:-Y}"
+  local reply
+
+  if [[ "$NON_INTERACTIVE" -eq 1 ]]; then
+    debug_log "Auto-answering prompt in non-interactive mode: $prompt -> $default_answer"
+    [[ "$default_answer" =~ ^[Yy]$ ]]
+    return
+  fi
+
+  read -r -p "$prompt" reply
+  if [[ -z "$reply" ]]; then
+    reply="$default_answer"
+  fi
+
+  [[ "$reply" =~ ^[Yy]$ ]]
+}
+
 show_usage() {
   cat <<'USAGE'
-Usage: ./scripts/install.sh [--debug|-d] [--help|-h]
+Usage: ./scripts/install.sh [--debug|-d] [--setup-browser] [--no-setup-browser] [--yes|-y|--non-interactive] [--help|-h]
 
 Options:
-  -d, --debug   Print auth URL and browser-launch diagnostics.
-  -h, --help    Show this help and exit.
+  -d, --debug           Print auth URL and browser-launch diagnostics.
+      --setup-browser   Persist BROWSER for WSL shells even if already set in this session.
+      --no-setup-browser
+                        Skip automatic WSL BROWSER setup.
+  -y, --yes,
+      --non-interactive Auto-accept installer prompts and use default values.
+  -h, --help            Show this help and exit.
 USAGE
+}
+
+show_debug_banner() {
+  [[ "$DEBUG" -eq 1 ]] || return 0
+  yellow "Installer debug mode"
+  printf '  script: %s\n' "$0"
+  printf '  version: %s\n' "$INSTALL_SCRIPT_VERSION"
+  printf '  shell: %s\n' "${SHELL:-<unset>}"
+  printf '  install dir: %s\n' "$INSTALL_DIR"
+}
+
+is_wsl() {
+  grep -qiE "(microsoft|wsl)" /proc/version 2>/dev/null
+}
+
+browser_env_is_target() {
+  [[ "${BROWSER:-}" == "$TARGET_BROWSER" ]]
+}
+
+select_shell_rc_file() {
+  local shell_name="${SHELL##*/}"
+  case "$shell_name" in
+    bash)
+      printf '%s\n' "$HOME/.bashrc"
+      ;;
+    zsh)
+      printf '%s\n' "$HOME/.zshrc"
+      ;;
+    *)
+      for candidate in "$HOME/.zshrc" "$HOME/.bashrc" "$HOME/.profile"; do
+        if [[ -f "$candidate" ]]; then
+          printf '%s\n' "$candidate"
+          return 0
+        fi
+      done
+      printf '%s\n' "$HOME/.profile"
+      ;;
+  esac
+}
+
+shell_reload_command() {
+  local rc_file="$1"
+  printf 'source "%s"' "$rc_file"
+}
+
+print_shell_reload_notice() {
+  local rc_file="$1"
+  local reason="${2:-To load PATH, BROWSER, and the proxy() helper in your current shell now, run:}"
+
+  bold "IMPORTANT: reload your shell config"
+  yellow "$reason"
+  printf '  %s\n' "$(shell_reload_command "$rc_file")"
+}
+
+is_script_sourced() {
+  [[ "${BASH_SOURCE[0]}" != "$0" ]]
+}
+
+rc_has_target_browser_export() {
+  local rc_file="$1"
+  [[ -f "$rc_file" ]] || return 1
+  grep -Fqx "export BROWSER=\"$TARGET_BROWSER\"" "$rc_file"
+}
+
+rc_has_any_browser_export() {
+  local rc_file="$1"
+  [[ -f "$rc_file" ]] || return 1
+  grep -Eq '^[[:space:]]*export[[:space:]]+BROWSER=' "$rc_file"
+}
+
+append_target_browser_export() {
+  local rc_file="$1"
+  touch "$rc_file" || die "Could not create or update $rc_file"
+  {
+    printf '\n%s\n' "$BROWSER_SETUP_MARKER"
+    printf 'export BROWSER="%s"\n' "$TARGET_BROWSER"
+  } >> "$rc_file"
+}
+
+path_env_contains_install_dir() {
+  case ":$PATH:" in
+    *":$INSTALL_DIR:"*)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+rc_has_install_dir_path_export() {
+  local rc_file="$1"
+  [[ -f "$rc_file" ]] || return 1
+  grep -Eq "(^|[[:space:]])PATH=.*${INSTALL_DIR//\//\\/}" "$rc_file"
+}
+
+append_install_dir_path_export() {
+  local rc_file="$1"
+  touch "$rc_file" || die "Could not create or update $rc_file"
+  {
+    printf '\n%s\n' "$PATH_SETUP_MARKER"
+    printf 'export PATH="%s:$PATH"\n' "$INSTALL_DIR"
+  } >> "$rc_file"
+}
+
+rc_has_proxy_function() {
+  local rc_file="$1"
+  [[ -f "$rc_file" ]] || return 1
+  grep -Fq "$PROXY_FUNCTION_MARKER" "$rc_file"
+}
+
+append_proxy_function() {
+  local rc_file="$1"
+  touch "$rc_file" || die "Could not create or update $rc_file"
+  {
+    printf '\n%s\n' "$PROXY_FUNCTION_MARKER"
+    printf 'proxy() {\n'
+    printf '    source "%s" "$@"\n' "$PROXY_TOGGLE_BIN"
+    printf '}\n'
+  } >> "$rc_file"
+}
+
+install_proxy_toggle_script() {
+  mkdir -p "$INSTALL_DIR"
+  yellow "Installing proxy helper..."
+  curl -fsSL "$PROXY_TOGGLE_URL" -o "$PROXY_TOGGLE_BIN" \
+    || die "Could not download proxy-toggle.sh from $PROXY_TOGGLE_URL"
+  chmod 755 "$PROXY_TOGGLE_BIN"
+  green "Proxy helper installed to $PROXY_TOGGLE_BIN"
+}
+
+configure_proxy_shell_function() {
+  local rc_file
+
+  rc_file="$(select_shell_rc_file)"
+  LAST_SHELL_RC_FILE="$rc_file"
+  debug_log "Proxy function target rc file: $rc_file"
+
+  if rc_has_proxy_function "$rc_file"; then
+    green "proxy() is already configured in $rc_file"
+    print_shell_reload_notice "$rc_file" "To load the proxy() helper in your current shell now, run:"
+    return 0
+  fi
+
+  append_proxy_function "$rc_file"
+  green "Configured proxy() in $rc_file"
+  print_shell_reload_notice "$rc_file" "proxy() was added permanently to $rc_file. Run this now in your current shell:"
+}
+
+configure_path_shell_env() {
+  local rc_file
+  local reload_cmd
+
+  if path_env_contains_install_dir; then
+    green "$INSTALL_DIR is already on PATH for this shell session."
+    debug_log "Skipping PATH persistence because $INSTALL_DIR is already on PATH"
+    return 0
+  fi
+
+  rc_file="$(select_shell_rc_file)"
+  LAST_SHELL_RC_FILE="$rc_file"
+  reload_cmd="$(shell_reload_command "$rc_file")"
+  debug_log "PATH setup target rc file: $rc_file"
+
+  if rc_has_install_dir_path_export "$rc_file"; then
+    yellow "WARNING: $INSTALL_DIR is not in your \$PATH for this shell session."
+    yellow "It is already configured in $rc_file."
+    print_shell_reload_notice "$rc_file" "To load PATH in your current shell now, run:"
+    return 0
+  fi
+
+  append_install_dir_path_export "$rc_file"
+  green "Configured PATH update in $rc_file"
+  print_shell_reload_notice "$rc_file" "PATH was added permanently to $rc_file. Run this now in your current shell:"
+}
+
+ensure_current_session_browser() {
+  export BROWSER="$TARGET_BROWSER"
+}
+
+install_missing_packages() {
+  local packages=("$@")
+  local apt_cmd=()
+
+  [[ ${#packages[@]} -gt 0 ]] || return 0
+
+  if ! command -v apt-get >/dev/null 2>&1; then
+    die "Missing required tools: ${packages[*]}. Install them manually and retry."
+  fi
+
+  yellow "Missing required tools: ${packages[*]}"
+  if ! prompt_yes_no "Install them now with apt-get? [Y/n]: " "Y"; then
+    die "Cannot continue without: ${packages[*]}"
+  fi
+
+  if [[ "$EUID" -eq 0 ]]; then
+    apt_cmd=(apt-get)
+  elif command -v sudo >/dev/null 2>&1; then
+    apt_cmd=(sudo apt-get)
+  else
+    die "sudo is required to install missing packages. Install sudo or run this script as root."
+  fi
+
+  "${apt_cmd[@]}" update
+  "${apt_cmd[@]}" install -y "${packages[@]}"
+}
+
+resolve_icu_package() {
+  if ! command -v apt-cache >/dev/null 2>&1; then
+    printf '%s\n' "libicu-dev"
+    return 0
+  fi
+
+  local package_name
+  package_name="$(apt-cache pkgnames 2>/dev/null | grep -E '^libicu[0-9]+$' | sort -V | tail -n 1)"
+  if [[ -n "$package_name" ]]; then
+    printf '%s\n' "$package_name"
+    return 0
+  fi
+
+  printf '%s\n' "libicu-dev"
+}
+
+ensure_runtime_requirements() {
+  local runtime_packages=()
+
+  if ! ldconfig -p 2>/dev/null | grep -q 'libicuuc'; then
+    runtime_packages+=("$(resolve_icu_package)")
+  fi
+
+  install_missing_packages "${runtime_packages[@]}"
+
+  if ! ldconfig -p 2>/dev/null | grep -q 'libicuuc'; then
+    die "CoreCli requires ICU on Linux. Install libicu and retry."
+  fi
+}
+
+ensure_required_tools() {
+  local missing_packages=()
+  local tool
+
+  for tool in curl unzip python3; do
+    if ! command -v "$tool" >/dev/null 2>&1; then
+      missing_packages+=("$tool")
+    fi
+  done
+
+  install_missing_packages "${missing_packages[@]}"
+
+  for tool in curl unzip python3; do
+    command -v "$tool" >/dev/null 2>&1 || die "'$tool' is required but could not be installed."
+  done
+}
+
+configure_browser_shell_env() {
+  local rc_file
+  local reload_cmd
+
+  if ! is_wsl; then
+    debug_log "Skipping BROWSER persistence outside WSL"
+    return 0
+  fi
+
+  if [[ "$BROWSER_SETUP_MODE" == "skip" ]]; then
+    yellow "Skipping WSL BROWSER setup (--no-setup-browser)."
+    return 0
+  fi
+
+  ensure_current_session_browser
+
+  rc_file="$(select_shell_rc_file)"
+  LAST_SHELL_RC_FILE="$rc_file"
+  reload_cmd="$(shell_reload_command "$rc_file")"
+
+  if rc_has_target_browser_export "$rc_file"; then
+    green "Using Microsoft Edge for BROWSER in this installer session."
+    green "BROWSER is already configured in $rc_file"
+    print_shell_reload_notice "$rc_file" "To load BROWSER in your current shell after install, run:"
+    return 0
+  fi
+
+  if rc_has_any_browser_export "$rc_file"; then
+    green "Using Microsoft Edge for BROWSER in this installer session."
+    yellow "Detected an existing BROWSER export in $rc_file. Leaving it unchanged."
+    yellow "If you want to persist Microsoft Edge for future shells, add:"
+    printf '  export BROWSER="%s"\n' "$TARGET_BROWSER"
+    return 0
+  fi
+
+  append_target_browser_export "$rc_file"
+  green "Using Microsoft Edge for BROWSER in this installer session."
+  green "Configured BROWSER in $rc_file"
+  print_shell_reload_notice "$rc_file" "BROWSER was added permanently to $rc_file. Run this now in your current shell:"
+}
+
+reload_shell_rc_if_possible() {
+  local rc_file="${LAST_SHELL_RC_FILE:-}"
+
+  [[ -n "$rc_file" ]] || return 0
+  [[ -f "$rc_file" ]] || return 0
+
+  if is_script_sourced; then
+    # shellcheck disable=SC1090
+    source "$rc_file"
+    green "Reloaded $rc_file into the current shell session."
+    return 0
+  fi
+
+  yellow "The installer cannot modify the parent shell environment when run via 'bash <(...)'."
+  print_shell_reload_notice "$rc_file" "Run this in the shell where you started the installer:"
 }
 
 for arg in "$@"; do
   case "$arg" in
     -d|--debug)
       DEBUG=1
+      ;;
+    --setup-browser)
+      BROWSER_SETUP_MODE="force"
+      ;;
+    --no-setup-browser)
+      BROWSER_SETUP_MODE="skip"
+      ;;
+    -y|--yes|--non-interactive)
+      NON_INTERACTIVE=1
       ;;
     -h|--help)
       show_usage
@@ -72,6 +425,8 @@ for arg in "$@"; do
       ;;
   esac
 done
+
+show_debug_banner
 
 open_browser() {
   local url="$1"
@@ -87,7 +442,7 @@ open_browser() {
     resolved_wslview="$(command -v wslview)"
   fi
 
-  if grep -qiE "(microsoft|wsl)" /proc/version 2>/dev/null; then
+  if is_wsl; then
     is_wsl=1
   fi
 
@@ -105,7 +460,7 @@ open_browser() {
     1) Install wslview (recommended):
          sudo apt install wslu
     2) Or set BROWSER to a real Windows browser executable (not xdg-open/wslview):
-         export BROWSER='/mnt/c/Program Files (x86)/Microsoft/Edge/Application/msedge.exe'
+         export BROWSER='$TARGET_BROWSER'
 
   Then re-run with:
     ./scripts/install.sh --debug"
@@ -180,7 +535,7 @@ open_browser() {
     sudo apt install wslu
 
   Or set the BROWSER environment variable to your browser path:
-    export BROWSER='/mnt/c/Program Files (x86)/Microsoft/Edge/Application/msedge.exe'
+    export BROWSER='$TARGET_BROWSER'
     ./scripts/install.sh
 
   Or on native Linux, ensure xdg-open is configured:
@@ -200,12 +555,19 @@ LISTENER_PID=""
 # 1. Dependency check
 # ---------------------------------------------------------------------------
 
-for cmd in curl unzip python3; do
-  command -v "$cmd" >/dev/null 2>&1 || die "'$cmd' is required but not installed. Please install it and retry."
-done
+ensure_required_tools
+ensure_runtime_requirements
 
 # ---------------------------------------------------------------------------
-# 2. PKCE Authentication (browser-based — satisfies Conditional Access)
+# 2. WSL browser setup
+# ---------------------------------------------------------------------------
+
+echo ""
+bold "Checking browser setup..."
+configure_browser_shell_env
+
+# ---------------------------------------------------------------------------
+# 3. PKCE Authentication (browser-based — satisfies Conditional Access)
 # ---------------------------------------------------------------------------
 
 bold "Authenticating via browser (Entra ID)..."
@@ -379,8 +741,13 @@ echo ""
 # 4. Prompt for binary name
 # ---------------------------------------------------------------------------
 
-read -rp "Binary name in $INSTALL_DIR [corecli]: " LINK_NAME
-LINK_NAME="${LINK_NAME:-corecli}"
+if [[ "$NON_INTERACTIVE" -eq 1 ]]; then
+  LINK_NAME="corecli"
+  yellow "Non-interactive mode: using default binary name '$LINK_NAME'."
+else
+  read -rp "Binary name in $INSTALL_DIR [corecli]: " LINK_NAME
+  LINK_NAME="${LINK_NAME:-corecli}"
+fi
 
 [[ "$LINK_NAME" != */* ]] || die "Binary name must not contain '/'. Got: $LINK_NAME"
 [[ -n "$LINK_NAME" ]]     || die "Binary name must not be empty."
@@ -433,22 +800,25 @@ find "$EXTRACTED_DIR" -maxdepth 1 -name '*.pdb' -exec install -m 644 {} "$INSTAL
 green "Binary and debug symbols (PDB) installed to $INSTALL_DIR"
 
 # ---------------------------------------------------------------------------
-# 6. PATH check
+# 6. Proxy helper
 # ---------------------------------------------------------------------------
 
-# Warn if ~/.local/bin (or $XDG_BIN_HOME) is not on PATH
-case ":$PATH:" in
-  *":$INSTALL_DIR:"*) ;;
-  *)
-    echo ""
-    yellow "WARNING: $INSTALL_DIR is not in your \$PATH."
-    yellow "Add the following to your ~/.bashrc or ~/.profile:"
-    printf '  export PATH="%s:$PATH"\n' "$INSTALL_DIR"
-    ;;
-esac
+install_proxy_toggle_script
 
 # ---------------------------------------------------------------------------
-# 7. Verify
+# 7. PATH check
+# ---------------------------------------------------------------------------
+
+configure_path_shell_env
+
+# ---------------------------------------------------------------------------
+# 8. Proxy function
+# ---------------------------------------------------------------------------
+
+configure_proxy_shell_function
+
+# ---------------------------------------------------------------------------
+# 9. Verify
 # ---------------------------------------------------------------------------
 
 echo ""
@@ -459,4 +829,10 @@ green "OK: $INSTALL_VERSION"
 echo ""
 green "CoreCli $VERSION installed successfully."
 green "Browser routing verified — corecli login will work on this machine."
+reload_shell_rc_if_possible
+if ! is_script_sourced && [[ -n "$LAST_SHELL_RC_FILE" ]]; then
+  echo ""
+  print_shell_reload_notice "$LAST_SHELL_RC_FILE" "Before using corecli in this shell, run:"
+fi
 printf 'Run: %s\n' "$INSTALL_BIN"
+printf 'Then try: %s\n' 'proxy status'
