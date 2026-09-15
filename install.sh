@@ -23,9 +23,8 @@ CLIENT_ID="aebc6443-996d-45c2-90f0-388ff96faa56"        # VS Code public client 
                                                            # Fallback: 520894b5-f6ae-42e1-9248-de753858e3ad (CoreCli app, requires admin consent for Storage scope)
 SCOPE="https://storage.azure.com/user_impersonation"
 STORAGE_BASE="https://sptweusacorecli.blob.core.windows.net/releases"
-LATEST_TXT_URL="$STORAGE_BASE/latest.txt"
 INSTALL_DIR="${XDG_BIN_HOME:-$HOME/.local/bin}"
-INSTALL_SCRIPT_VERSION="2026-04-30.1"
+INSTALL_SCRIPT_VERSION="2026-09-15.1"
 PROXY_TOGGLE_URL="https://raw.githubusercontent.com/henrik-sandberg-telia/corecli/main/proxy-toggle.sh"
 PROXY_TOGGLE_BIN="$INSTALL_DIR/proxy-toggle.sh"
 TARGET_BROWSER="/mnt/c/Program Files (x86)/Microsoft/Edge/Application/msedge.exe"
@@ -33,11 +32,15 @@ BROWSER_SETUP_MODE="auto"
 BROWSER_SETUP_MARKER="# CoreCli browser setup"
 PATH_SETUP_MARKER="# CoreCli path setup"
 PROXY_FUNCTION_MARKER="# CoreCli proxy function"
+RID=""
+REQUESTED_RID=""
+LATEST_JSON_URL=""
+PREVIEW=0
 TMP_ZIP="/tmp/CoreCli_install_$$.zip"
 TMP_EXTRACT="/tmp/corecli-extract-$$"
 TMP_CODE="/tmp/CoreCli_authcode_$$"
 TMP_PYLISTENER="/tmp/CoreCli_listener_$$.py"
-ZIP_INNER_DIR="CoreCli/linux-x64-singlefile"   # directory containing binary + PDB files
+ZIP_INNER_DIR=""   # directory containing binary + PDB files
 DEBUG=0
 NON_INTERACTIVE=0
 LAST_SHELL_RC_FILE=""
@@ -79,10 +82,12 @@ prompt_yes_no() {
 
 show_usage() {
   cat <<'USAGE'
-Usage: ./scripts/install.sh [--debug|-d] [--setup-browser] [--no-setup-browser] [--yes|-y|--non-interactive] [--help|-h]
+Usage: ./scripts/install.sh [--debug|-d] [--rid <RID>] [--preview] [--setup-browser] [--no-setup-browser] [--yes|-y|--non-interactive] [--help|-h]
 
 Options:
   -d, --debug           Print auth URL and browser-launch diagnostics.
+      --rid <RID>       Override the detected release target with a compatible RID.
+      --preview         Install from the optional preview release channel.
       --setup-browser   Persist BROWSER for WSL shells even if already set in this session.
       --no-setup-browser
                         Skip automatic WSL BROWSER setup.
@@ -103,6 +108,35 @@ show_debug_banner() {
 
 is_wsl() {
   grep -qiE "(microsoft|wsl)" /proc/version 2>/dev/null
+}
+
+resolve_release_target() {
+  local os_name architecture detected_rid
+
+  os_name="$(uname -s)"
+  architecture="$(uname -m)"
+  case "$os_name:$architecture" in
+    Linux:x86_64|Linux:amd64) detected_rid="linux-x64" ;;
+    Linux:aarch64|Linux:arm64) detected_rid="linux-arm64" ;;
+    Darwin:x86_64|Darwin:amd64) detected_rid="osx-x64" ;;
+    Darwin:arm64|Darwin:aarch64) detected_rid="osx-arm64" ;;
+    *) die "Unsupported operating system or architecture: $os_name/$architecture. Supported targets are Linux and macOS on x64 or ARM64." ;;
+  esac
+
+  RID="${REQUESTED_RID:-$detected_rid}"
+  case "$RID" in
+    linux-x64|linux-arm64|osx-x64|osx-arm64) ;;
+    *) die "Unsupported release target '$RID'. Supported targets: linux-x64, linux-arm64, osx-x64, osx-arm64." ;;
+  esac
+
+  [[ "$RID" == "$detected_rid" ]] || die "Release target '$RID' is incompatible with this host ($detected_rid)."
+
+  if [[ "$PREVIEW" -eq 1 ]]; then
+    LATEST_JSON_URL="$STORAGE_BASE/preview-$RID.json"
+  else
+    LATEST_JSON_URL="$STORAGE_BASE/latest-$RID.json"
+  fi
+  ZIP_INNER_DIR="CoreCli/$RID-singlefile"
 }
 
 browser_env_is_target() {
@@ -316,6 +350,8 @@ resolve_icu_package() {
 ensure_runtime_requirements() {
   local runtime_packages=()
 
+  [[ "$RID" == linux-* ]] || return 0
+
   if ! ldconfig -p 2>/dev/null | grep -q 'libicuuc'; then
     runtime_packages+=("$(resolve_icu_package)")
   fi
@@ -402,10 +438,18 @@ reload_shell_rc_if_possible() {
   print_shell_reload_notice "$rc_file" "Run this in the shell where you started the installer:"
 }
 
-for arg in "$@"; do
-  case "$arg" in
+while [[ $# -gt 0 ]]; do
+  case "$1" in
     -d|--debug)
       DEBUG=1
+      ;;
+    --rid)
+      [[ $# -ge 2 ]] || die "--rid requires a value."
+      REQUESTED_RID="$2"
+      shift
+      ;;
+    --preview)
+      PREVIEW=1
       ;;
     --setup-browser)
       BROWSER_SETUP_MODE="force"
@@ -421,12 +465,14 @@ for arg in "$@"; do
       exit 0
       ;;
     *)
-      die "Unknown argument: $arg. Use --help to see supported options."
+      die "Unknown argument: $1. Use --help to see supported options."
       ;;
   esac
+  shift
 done
 
 show_debug_banner
+resolve_release_target
 
 open_browser() {
   local url="$1"
@@ -723,18 +769,52 @@ BLOB_HEADERS=(-H "Authorization: Bearer $TOKEN" -H "x-ms-version: 2020-04-08")
 # 3. Fetch latest version info from blob storage
 # ---------------------------------------------------------------------------
 
-bold "Fetching latest version info..."
+if [[ "$PREVIEW" -eq 1 ]]; then
+  bold "Fetching preview release info for $RID..."
+else
+  bold "Fetching latest release info for $RID..."
+fi
 
-LATEST_CONTENT=$(curl -sf "${BLOB_HEADERS[@]}" "$LATEST_TXT_URL") \
-  || die "Could not read latest.txt from storage. Do you have Storage Blob Data Reader on the releases container?"
+LATEST_CONTENT=$(curl -sf "${BLOB_HEADERS[@]}" "$LATEST_JSON_URL") \
+  || die "Could not read $(basename "$LATEST_JSON_URL") from storage. Do you have Storage Blob Data Reader on the releases container?"
 
-VERSION=$(echo "$LATEST_CONTENT" | awk '/^Version:/{print $2}')
-URL=$(echo "$LATEST_CONTENT"     | awk '/^URL:/{print $2}')
+MANIFEST_RID=$(printf '%s' "$LATEST_CONTENT" | python3 -c '
+import json, sys
+try:
+    manifest = json.load(sys.stdin)
+except json.JSONDecodeError as error:
+    raise SystemExit(f"Invalid release manifest JSON: {error}")
+for key in ("rid", "version", "url"):
+    if not isinstance(manifest.get(key), str) or not manifest[key].strip():
+        raise SystemExit(f"Release manifest missing {key!r}")
+print(manifest["rid"].strip())
+') || die "Could not parse the release manifest."
 
-[[ -n "$VERSION" ]] || die "Could not parse 'Version:' from latest.txt."
-[[ -n "$URL" ]]     || die "Could not parse 'URL:' from latest.txt."
+VERSION=$(printf '%s' "$LATEST_CONTENT" | python3 -c 'import json, sys; print(json.load(sys.stdin)["version"].strip())')
+URL=$(printf '%s' "$LATEST_CONTENT" | python3 -c '
+import json, sys
+from urllib.parse import urlparse
+url = json.load(sys.stdin)["url"].strip()
+parsed = urlparse(url)
+if not parsed.scheme or not parsed.netloc:
+    raise SystemExit("Release manifest URL must be absolute")
+print(url)
+') || die "Could not parse the release manifest URL."
+RELEASE_NOTES=$(printf '%s' "$LATEST_CONTENT" | python3 -c '
+import json, sys
+notes = json.load(sys.stdin).get("releaseNotes", "")
+if notes is not None and not isinstance(notes, str):
+    raise SystemExit("Release manifest releaseNotes must be a string")
+print(notes or "", end="")
+') || die "Could not parse release notes from the release manifest."
+
+[[ "$MANIFEST_RID" == "$RID" ]] || die "Release manifest target '$MANIFEST_RID' does not match requested target '$RID'."
 
 green "Latest stable: $VERSION"
+if [[ -n "$RELEASE_NOTES" ]]; then
+  echo ""
+  printf '%s\n' "$RELEASE_NOTES"
+fi
 echo ""
 
 # ---------------------------------------------------------------------------

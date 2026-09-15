@@ -1,6 +1,6 @@
 # Scripts
 
-This folder contains the shell scripts used to install and support CoreCli in WSL/Linux environments.
+This folder contains shell scripts used to install and support CoreCli on Linux, WSL, and macOS.
 
 ## Install Script
 
@@ -32,16 +32,76 @@ command -v curl >/dev/null 2>&1 || { sudo apt-get update && sudo apt-get install
 bash <(curl -fsSL https://raw.githubusercontent.com/henrik-sandberg-telia/corecli/main/install.sh) --yes
 ```
 
+## State Service Mock (`state_service_mock.py`)
+
+`state_service_mock.py` is a self-contained local mock of the SPT State Service for
+manually testing the `corecli state ...` commands against fleets of fake
+devices/RWOs in **dev** mode. It uses only the Python standard library
+(`http.server`, `ssl`, `json`).
+
+In dev, `CoreAPI.State` points at `https://localhost:5001` with SSL validation
+bypassed, so the mock serves HTTPS there using a self-signed certificate that is
+generated once (via `openssl`) into `scripts/.state-mock/`.
+
+Run it:
+
+```bash
+python3 scripts/state_service_mock.py            # HTTPS on localhost:5001
+python3 scripts/state_service_mock.py --http     # plain HTTP (debugging)
+python3 scripts/state_service_mock.py --port 8443 --host 0.0.0.0
+```
+
+Then, in another shell:
+
+```bash
+corecli env dev
+corecli login                                    # once; the mock ignores the token
+corecli state get -d 0009d805884c,0009d805884d   # fan-out over a fake fleet
+corecli state reported -d 0009d805884c --property config
+corecli state set-desired -d 0009d805884c --property firmware_version --value 1.5.0
+corecli state desired -d 0009d805884c            # shows the override
+```
+
+> The CLI validates `-d/--devices` as MAC addresses (12 hex digits, with or without
+> `:` separators), so use MAC-shaped ids like above. The mock itself accepts *any*
+> id — handy for direct `curl` testing, or pass
+> `--skip-device-serial-validation` to bypass the CLI check.
+
+Behavior:
+
+- **Any id works** — reported/desired state is auto-generated deterministically
+  per id (stable across GETs). Reported includes `firmware_version`,
+  `battery_level`, `connection_status`, and a nested `config` object (to exercise
+  the multi-line table cell rendering).
+- **`set-desired` persists in-memory** for the process lifetime; the override
+  wins over generated state on subsequent reads.
+- **Auth is ignored** — the mock does not validate the `Authorization` header, but
+  the CLI still acquires a real Entra token in dev, so you run `corecli login`
+  once as usual.
+- **History** returns `{ "data": [ { "timestamp", "value" }, ... ] }` — a
+  deterministic synthetic numeric time series per reported property (12 points at
+  5-minute intervals). History is only served for the `reported` section; requesting
+  it on `desired` returns `404`.
+- **Error simulation** for testing fan-out/error rendering:
+  - id `notfound` (or prefix `notfound`) or MAC `00:00:00:00:00:00` → `404`
+  - id `boom` or MAC `00:00:00:00:00:01` → `500`
+  - `set-desired` with property `unsupported` → `400` (`unsupported-state-key`)
+  - `set-desired` against an RWO → `405` (desired is read-only for RWOs)
+
+The generated certificate directory (`scripts/.state-mock/`) is disposable; delete
+it to force a new certificate on the next run.
+
 ## What `install.sh` Does
 
-The installer is designed for WSL/Linux and performs these steps in order:
+The installer supports Linux x64/ARM64 and macOS x64/ARM64. It performs these steps in order:
 
-1. Validates runtime prerequisites and can install missing `curl`, `unzip`, `python3`, and ICU packages with `apt-get`.
+1. Detects a compatible release RID from the host OS and CPU architecture.
+2. Validates runtime prerequisites and, on Linux only, can install missing `curl`, `unzip`, `python3`, and ICU packages with `apt-get`.
 2. Detects WSL and configures `BROWSER` to use Microsoft Edge for the installer session.
 3. Persists `BROWSER` to the detected shell rc file unless the user opts out with `--no-setup-browser`.
 4. Starts an Entra PKCE browser authentication flow against the CoreCli app registration.
-5. Reads `latest.txt` from the Azure Blob releases container.
-6. Downloads the latest CoreCli release zip.
+5. Reads `latest-<RID>.json` from the Azure Blob releases container and displays its release notes.
+6. Downloads the matching CoreCli release zip.
 7. Extracts and installs the CoreCli binary into `~/.local/bin` by default, or `$XDG_BIN_HOME` if set.
 8. Installs PDB files alongside the binary for better exception stack traces.
 9. Downloads `proxy-toggle.sh` into the install directory.
@@ -84,10 +144,15 @@ At runtime the installer writes the real install path, not the literal `~/.local
 `install.sh` supports these flags:
 
 - `--debug` or `-d`: prints installer version, shell context, auth URL diagnostics, and browser launcher diagnostics.
+- `--rid <RID>`: overrides platform detection only when the RID is compatible with the current host. Supported values are `linux-x64`, `linux-arm64`, `osx-x64`, and `osx-arm64`.
 - `--yes`, `-y`, or `--non-interactive`: auto-accepts installer prompts and uses default values.
 - `--setup-browser`: forces browser persistence logic on WSL.
 - `--no-setup-browser`: skips browser persistence logic on WSL.
 - `--help` or `-h`: shows usage.
+
+## Preview Updates
+
+`corecli check-updates --preview` and `./scripts/install.sh --preview` read `preview-<RID>.json` instead of the stable `latest-<RID>.json` manifest. Preview manifests are created only by tags with a suffix, such as `v2.3.1-preview.1`; they do not change the stable update channel.
 
 ## Shell Detection And Reload Behavior
 

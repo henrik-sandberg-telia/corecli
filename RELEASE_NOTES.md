@@ -1,5 +1,25 @@
 # Scripts Release Notes
 
+## Installer 2026-09-15.1
+
+### Summary
+
+Added platform-aware release selection for Linux and macOS, including an opt-in preview channel.
+
+### Included Functionality
+
+- Detects Linux or macOS and selects the matching x64 or ARM64 release package.
+- Supports `--rid` for a validated, host-compatible release-target override.
+- Downloads RID-specific JSON manifests containing release metadata and release notes.
+- Supports `--preview` to install from `preview-<RID>.json` without changing the stable channel.
+- Displays release notes before downloading the selected release.
+- Applies ICU and `apt-get` setup only on Linux; macOS retains prerequisite validation without Linux package installation.
+
+### Guardrails
+
+- Rejects unsupported operating systems, CPU architectures, and incompatible `--rid` values before authentication.
+- Keeps the stable `latest-<RID>.json` channel separate from preview manifests.
+
 ## Installer 2026-04-30.1
 
 ### Summary
