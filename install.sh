@@ -553,6 +553,13 @@ open_browser() {
       fi
       debug_log "xdg-open launcher failed"
     fi
+  elif [[ "$(uname -s)" == "Darwin" ]]; then
+    debug_log "Trying launcher: open"
+    if open "$url" 2>/dev/null; then
+      debug_log "Browser opened with open"
+      return
+    fi
+    debug_log "open launcher failed"
   else
     # 2. Native Linux: xdg-open first, then wslview fallback if available.
     if command -v xdg-open >/dev/null 2>&1; then
