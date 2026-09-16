@@ -24,7 +24,7 @@ CLIENT_ID="aebc6443-996d-45c2-90f0-388ff96faa56"        # VS Code public client 
 SCOPE="https://storage.azure.com/user_impersonation"
 STORAGE_BASE="https://sptweusacorecli.blob.core.windows.net/releases"
 INSTALL_DIR="${XDG_BIN_HOME:-$HOME/.local/bin}"
-INSTALL_SCRIPT_VERSION="2026-09-15.1"
+INSTALL_SCRIPT_VERSION="2026-09-16.1"
 PROXY_TOGGLE_URL="https://raw.githubusercontent.com/henrik-sandberg-telia/corecli/main/proxy-toggle.sh"
 PROXY_TOGGLE_BIN="$INSTALL_DIR/proxy-toggle.sh"
 TARGET_BROWSER="/mnt/c/Program Files (x86)/Microsoft/Edge/Application/msedge.exe"
@@ -356,7 +356,9 @@ ensure_runtime_requirements() {
     runtime_packages+=("$(resolve_icu_package)")
   fi
 
-  install_missing_packages "${runtime_packages[@]}"
+  if [[ ${#runtime_packages[@]} -gt 0 ]]; then
+    install_missing_packages "${runtime_packages[@]}"
+  fi
 
   if ! ldconfig -p 2>/dev/null | grep -q 'libicuuc'; then
     die "CoreCli requires ICU on Linux. Install libicu and retry."
@@ -373,7 +375,9 @@ ensure_required_tools() {
     fi
   done
 
-  install_missing_packages "${missing_packages[@]}"
+  if [[ ${#missing_packages[@]} -gt 0 ]]; then
+    install_missing_packages "${missing_packages[@]}"
+  fi
 
   for tool in curl unzip python3; do
     command -v "$tool" >/dev/null 2>&1 || die "'$tool' is required but could not be installed."
