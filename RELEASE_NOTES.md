@@ -1,5 +1,11 @@
 # Scripts Release Notes
 
+## Installer 2026-09-16.2
+
+### Bug Fixes
+
+- Fixed the empty package-list guard for macOS's bundled Bash 3.2 when `set -u` is enabled.
+
 ## Installer 2026-09-16.1
 
 ### Bug Fixes
