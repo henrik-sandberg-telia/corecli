@@ -1,3 +1,4 @@
+[![Board Status](https://dev.azure.com/teliaiot/1c7c0b50-eeda-4319-b6cb-e5188b53e6ee/3834d491-dc40-4178-b1bd-2d78a6d6bac7/_apis/work/boardbadge/d1f9937d-09a3-474b-9bbb-5449e8d0e838)](https://dev.azure.com/teliaiot/1c7c0b50-eeda-4319-b6cb-e5188b53e6ee/_boards/board/t/3834d491-dc40-4178-b1bd-2d78a6d6bac7/Microsoft.RequirementCategory)
 # Scripts
 
 This folder contains shell scripts used to install and support CoreCli on Linux, WSL, and macOS.
